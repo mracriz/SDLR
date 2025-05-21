@@ -1,0 +1,11 @@
+numpy
+pandas
+scikit-learn
+torch
+torchvision
+urllib3
+pytest-shutil
+gcsfs
+tensorboardX
+flatten_dict
+attr
