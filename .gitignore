@@ -1,3 +1,5 @@
+.DS_Store
+
 # Ignore all .csv files
 *.csv
 
@@ -118,4 +120,3 @@ Parameters/
 
 # Python cache directory (from original request)
 __pycache__/
-x
