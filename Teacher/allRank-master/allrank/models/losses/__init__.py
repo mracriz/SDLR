@@ -13,4 +13,5 @@ from .bce import *  # noqa F403 F401
 from .listSD import *
 from .listSD_MSLR import *
 from .listSDStu import *
+from .listSD_IPS import *
 
