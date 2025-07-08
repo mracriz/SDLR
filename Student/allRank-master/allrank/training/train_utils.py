@@ -175,7 +175,7 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
             break
 
     logger.info("Student training finished.")
-    torch.save(model.state_dict(), os.path.join(output_dir, "model.pkl"))
+    torch.save(model, os.path.join(output_dir, "model.pkl"))
     tensorboard_summary_writer.close_all_writers()
 
     return {
