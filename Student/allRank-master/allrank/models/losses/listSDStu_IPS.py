@@ -1,12 +1,10 @@
 import numpy as np
 import torch
 import os
-from pathlib import Path  # <-- Re-added pathlib
+from pathlib import Path
 
-###
 from allrank import config as conf
 import pandas as pd
-###
 
 from allrank.data.dataset_loading import PADDED_Y_VALUE
 from allrank.models.losses import DEFAULT_EPS
@@ -33,8 +31,8 @@ def listSDStu_IPS(y_pred, y_true, eps=DEFAULT_EPS, padded_value_indicator=PADDED
 
     observation_loss = torch.log(cumsums + eps) - preds_sorted_by_true_minus_max
 
-    # --- PATH RESTORED TO POINT TO TEACHER DIRECTORY ---
-    target_file_in_teacher = Path(os.getcwd()).parent.parent.parent / "Teacher" / "allRank-master" / "allrank" / "Parameters" / "One" / f"Sigma_All_Score_{str(Parameters_Path)}.csv"
+    # --- THIS LINE IS CORRECTED ---
+    target_file_in_teacher = Path(os.getcwd()).parent.parent.parent / "Teacher" / "allRank-master" / "allrank" / "Parameters" / "One" / "Sigma_All_Score_Best.csv"
     
     # Logic to read the .csv file
     df_bandwidth = pd.read_csv(target_file_in_teacher, index_col=0)

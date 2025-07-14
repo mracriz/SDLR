@@ -6,6 +6,8 @@ import pandas as pd
 import torch
 from torch.nn.utils import clip_grad_norm_
 from csv import DictWriter
+from tqdm import tqdm
+
 import allrank.models.metrics as metrics_module
 from allrank.data.dataset_loading import PADDED_Y_VALUE
 from allrank.models.model_utils import get_num_params, log_num_params
@@ -19,13 +21,14 @@ logger = get_logger()
 
 
 def estimate_propensities_pairwise(model, dataloader, device, num_positions, t_plus, t_minus):
+    # ... (no changes in this function)
     logger.info("Estimating propensities...")
     model.eval()
     t_plus_num = torch.zeros(num_positions, device=device)
     t_minus_num = torch.zeros(num_positions, device=device)
     epsilon = 1e-9
     with torch.no_grad():
-        for (features, labels, indices) in dataloader:
+        for (features, labels, indices) in tqdm(dataloader, desc="Estimating Propensities"):
             features, labels = features.to(device), labels.to(device)
             scores = model.score(features, (labels == PADDED_Y_VALUE), indices)
             for i in range(labels.shape[0]):
@@ -49,6 +52,7 @@ def estimate_propensities_pairwise(model, dataloader, device, num_positions, t_p
 
 
 def loss_batch(model, loss_func, xb, yb, indices, gradient_clipping_norm, opt=None, inverse_propensities_list=None):
+    # ... (no changes in this function)
     mask = (yb == PADDED_Y_VALUE)
     loss_kwargs = {"xb": xb}
     if inverse_propensities_list is not None:
@@ -64,6 +68,7 @@ def loss_batch(model, loss_func, xb, yb, indices, gradient_clipping_norm, opt=No
 
 
 def metric_on_batch(path,name,epoch,epochs,flag,metric, model, xb, yb, indices):
+    # ... (no changes in this function)
     d=0
     mask = (yb == PADDED_Y_VALUE)
     if flag=="test":
@@ -75,6 +80,7 @@ def metric_on_batch(path,name,epoch,epochs,flag,metric, model, xb, yb, indices):
 
 
 def metric_on_epoch(path,name,epoch,epochs,flag,metric, model, dl, dev):
+    # ... (no changes in this function)
     metric_values = torch.mean(
         torch.cat(
             [metric_on_batch(path,name,epoch,epochs,flag,metric, model, xb.to(device=dev), yb.to(device=dev), indices.to(device=dev))
@@ -85,6 +91,7 @@ def metric_on_epoch(path,name,epoch,epochs,flag,metric, model, dl, dev):
 
 
 def compute_metrics(path, name, epoch,epochs,flag,metrics, model, dl, dev):
+    # ... (no changes in this function)
     metric_values_dict = {}
     for metric_name, ats in metrics.items():
         metric_func = getattr(metrics_module, metric_name)
@@ -96,6 +103,7 @@ def compute_metrics(path, name, epoch,epochs,flag,metrics, model, dl, dev):
 
 
 def epoch_summary(epoch, train_loss, val_loss, train_metrics, val_metrics):
+    # ... (no changes in this function)
     summary = "Epoch : {epoch} Train loss: {train_loss} Val loss: {val_loss}".format(
         epoch=epoch, train_loss=train_loss, val_loss=val_loss)
     for metric_name, metric_value in train_metrics.items():
@@ -108,21 +116,20 @@ def epoch_summary(epoch, train_loss, val_loss, train_metrics, val_metrics):
 
 
 def get_current_lr(optimizer):
+    # ... (no changes in this function)
     for param_group in optimizer.param_groups:
         return param_group["lr"]
 
 
 def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, config,
         gradient_clipping_norm, early_stopping_patience, device, output_dir, tensorboard_output_path):
+    # ... (no changes in the initial part of the function)
     tensorboard_summary_writer = TensorboardSummaryWriter(tensorboard_output_path)
     num_params = get_num_params(model)
     log_num_params(num_params)
     early_stop = EarlyStop(early_stopping_patience)
     config.data.slate_length = int(np.ceil(max([train_dl.dataset.longest_query_length, valid_dl.dataset.longest_query_length]) / 10) * 10)
-    
-    params_path_name = config.data.path[config.data.path.rfind("Dataset/") + 8:].replace("/", "_")
-    loss_func.keywords["Parameters_Path"] = params_path_name
-    
+
     is_ips_loss = "IPS" in config.loss.name
     if is_ips_loss:
         logger.info(f"IPS loss function '{config.loss.name}' detected. Initializing automatic propensity estimation.")
@@ -163,7 +170,7 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
 
         train_losses = []
         train_nums = []
-        for xb, yb, indices in train_dl:
+        for xb, yb, indices in tqdm(train_dl, desc=f"Epoch {epoch+1}/{epochs} [Training]"):
             xb, yb, indices = xb.to(device), yb.to(device), indices.to(device)
             
             inverse_propensities_list = None
@@ -184,15 +191,15 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
             train_nums.append(num)
         
         train_loss = np.sum(np.multiply(train_losses, train_nums)) / np.sum(train_nums)
-        train_metrics = compute_metrics(params_path_name, config.loss.name, epoch, epochs, "train", config.metrics, model, train_dl, device)
+        train_metrics = compute_metrics(None, config.loss.name, epoch, epochs, "train", config.metrics, model, train_dl, device)
 
         model.eval()
         with torch.no_grad():
             val_losses, val_nums = zip(
                 *[loss_batch(model, loss_func, xb.to(device=device), yb.to(device=device), indices.to(device=device),
                              gradient_clipping_norm) for
-                  xb, yb, indices in valid_dl])
-            val_metrics = compute_metrics(params_path_name, config.loss.name, epoch, epochs, "test", config.metrics, model, valid_dl, device)
+                  xb, yb, indices in tqdm(valid_dl, desc=f"Epoch {epoch+1}/{epochs} [Validation]")])
+            val_metrics = compute_metrics(None, config.loss.name, epoch, epochs, "test", config.metrics, model, valid_dl, device)
 
         val_loss = np.sum(np.multiply(val_losses, val_nums)) / np.sum(val_nums)
         
@@ -222,20 +229,35 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
     os.makedirs(params_dir, exist_ok=True)
     logger.info(f"Training finished. Saving learned parameters to {params_dir}")
 
-    # Save SDLR bandwidths as .csv files
-    bw_path = os.path.join(params_dir, f"Sigma_All_Score_{params_path_name}.csv")
-    pd.DataFrame(conf.BandWidth.cpu().numpy()).to_csv(bw_path)
-    best_bw_path = os.path.join(params_dir, f"Sigma_All_Score_{params_path_name}_Best.csv")
-    pd.DataFrame(conf.Best_BandWidth.cpu().numpy()).to_csv(best_bw_path)
-    
-    changes_path = os.path.join(params_dir, f"Sigma_Changes_{params_path_name}.csv")
-    pd.DataFrame(torch.tensor(conf.BandWidth_Changes).cpu().numpy(), columns=["Changes"]).to_csv(changes_path)
+    num_files_to_save = 3 + (1 if is_ips_loss else 0) + 1  # bw, best_bw, changes, propensities (optional), model
+    with tqdm(total=num_files_to_save, desc="Saving Files") as pbar:
+        # Save SDLR bandwidths to a single file (will be overwritten on each run)
+        logger.info("Saving bandwidths...")
+        bw_path = os.path.join(params_dir, "Sigma_All_Score.csv")
+        pd.DataFrame(conf.BandWidth.cpu().numpy()).to_csv(bw_path)
+        pbar.update(1)
 
-    if is_ips_loss:
-        propensity_path = os.path.join(params_dir, f"propensities_{params_path_name}.pt")
-        torch.save({'t_plus': t_plus, 't_minus': t_minus}, propensity_path)
+        logger.info("Saving best bandwidths...")
+        best_bw_path = os.path.join(params_dir, "Sigma_All_Score_Best.csv")
+        pd.DataFrame(conf.Best_BandWidth.cpu().numpy()).to_csv(best_bw_path)
+        pbar.update(1)
 
-    torch.save(model.state_dict(), os.path.join(output_dir, "model.pkl"))
+        logger.info("Saving bandwidth changes...")
+        changes_path = os.path.join(params_dir, "Sigma_Changes.csv")
+        pd.DataFrame(torch.tensor(conf.BandWidth_Changes).cpu().numpy(), columns=["Changes"]).to_csv(changes_path)
+        pbar.update(1)
+
+        if is_ips_loss:
+            logger.info("Saving propensities...")
+            propensity_path = os.path.join(params_dir, "propensities.pt")
+            torch.save({'t_plus': t_plus, 't_minus': t_minus}, propensity_path)
+            pbar.update(1)
+
+        logger.info("Saving model state...")
+        torch.save(model.state_dict(), os.path.join(output_dir, "model.pkl"))
+        pbar.update(1)
+   
+
     tensorboard_summary_writer.close_all_writers()
 
     return {
