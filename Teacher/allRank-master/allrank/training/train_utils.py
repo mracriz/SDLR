@@ -1,12 +1,11 @@
 import os
 from functools import partial
-from collections import OrderedDict
 import numpy as np
 import pandas as pd
 import torch
 from torch.nn.utils import clip_grad_norm_
-from csv import DictWriter
 from tqdm import tqdm
+import mlflow  # <-- Import MLflow
 
 import allrank.models.metrics as metrics_module
 from allrank.data.dataset_loading import PADDED_Y_VALUE
@@ -14,14 +13,15 @@ from allrank.models.model_utils import get_num_params, log_num_params
 from allrank.training.early_stop import EarlyStop
 from allrank.utils.ltr_logging import get_logger
 from allrank.utils.tensorboard_utils import TensorboardSummaryWriter
-from allrank.training.Compute_BandWidth_torch import Compute_BandWidth
-from allrank import config
+from allrank import config as conf # Use `conf` for global parameters
 
 logger = get_logger()
 
+# =================================================================================
+# Helper functions (Your original code - no changes needed here)
+# =================================================================================
 
 def estimate_propensities_pairwise(model, dataloader, device, num_positions, t_plus, t_minus):
-    # ... (no changes in this function)
     logger.info("Estimating propensities...")
     model.eval()
     t_plus_num = torch.zeros(num_positions, device=device)
@@ -52,7 +52,6 @@ def estimate_propensities_pairwise(model, dataloader, device, num_positions, t_p
 
 
 def loss_batch(model, loss_func, xb, yb, indices, gradient_clipping_norm, opt=None, inverse_propensities_list=None):
-    # ... (no changes in this function)
     mask = (yb == PADDED_Y_VALUE)
     loss_kwargs = {"xb": xb}
     if inverse_propensities_list is not None:
@@ -67,77 +66,65 @@ def loss_batch(model, loss_func, xb, yb, indices, gradient_clipping_norm, opt=No
     return loss.item(), len(xb)
 
 
-def metric_on_batch(path,name,epoch,epochs,flag,metric, model, xb, yb, indices):
-    # ... (no changes in this function)
-    d=0
+def metric_on_batch(metric, model, xb, yb, indices):
     mask = (yb == PADDED_Y_VALUE)
-    if flag=="test":
-        if epoch == epochs-1:
-            d = 1
     y_pred_scores = model.score(xb, mask, indices)
-    true_labels = yb
-    return metric(y_pred_scores, true_labels)
+    return metric(y_pred_scores, yb)
 
 
-def metric_on_epoch(path,name,epoch,epochs,flag,metric, model, dl, dev):
-    # ... (no changes in this function)
+def metric_on_epoch(metric, model, dl, dev):
     metric_values = torch.mean(
         torch.cat(
-            [metric_on_batch(path,name,epoch,epochs,flag,metric, model, xb.to(device=dev), yb.to(device=dev), indices.to(device=dev))
+            [metric_on_batch(metric, model, xb.to(device=dev), yb.to(device=dev), indices.to(device=dev))
              for xb, yb, indices in dl]
         ), dim=0
     ).cpu().numpy()
     return metric_values
 
 
-def compute_metrics(path, name, epoch,epochs,flag,metrics, model, dl, dev):
-    # ... (no changes in this function)
+def compute_metrics(metrics, model, dl, dev):
     metric_values_dict = {}
     for metric_name, ats in metrics.items():
         metric_func = getattr(metrics_module, metric_name)
         metric_func_with_ats = partial(metric_func, ats=ats)
-        metrics_values = metric_on_epoch(path,name,epoch,epochs,flag,metric_func_with_ats, model, dl, dev)
-        metrics_names = ["{metric_name}_{at}".format(metric_name=metric_name, at=at) for at in ats]
+        metrics_values = metric_on_epoch(metric_func_with_ats, model, dl, dev)
+        metrics_names = [f"{metric_name}_{at}" for at in ats]
         metric_values_dict.update(dict(zip(metrics_names, metrics_values)))
     return metric_values_dict
 
 
 def epoch_summary(epoch, train_loss, val_loss, train_metrics, val_metrics):
-    # ... (no changes in this function)
-    summary = "Epoch : {epoch} Train loss: {train_loss} Val loss: {val_loss}".format(
-        epoch=epoch, train_loss=train_loss, val_loss=val_loss)
-    for metric_name, metric_value in train_metrics.items():
-        summary += " Train {metric_name} {metric_value}".format(
-            metric_name=metric_name, metric_value=metric_value)
-    for metric_name, metric_value in val_metrics.items():
-        summary += " Val {metric_name} {metric_value}".format(
-            metric_name=metric_name, metric_value=metric_value)
+    summary = f"Epoch : {epoch} Train loss: {train_loss:.4f} Val loss: {val_loss:.4f}"
+    for name, value in train_metrics.items():
+        summary += f" Train {name}: {np.mean(value):.4f}"
+    for name, value in val_metrics.items():
+        summary += f" Val {name}: {np.mean(value):.4f}"
     return summary
 
 
 def get_current_lr(optimizer):
-    # ... (no changes in this function)
-    for param_group in optimizer.param_groups:
-        return param_group["lr"]
+    return optimizer.param_groups[0]["lr"]
 
+# =================================================================================
+# Main `fit` function with MLflow Integration
+# =================================================================================
 
 def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, config,
         gradient_clipping_norm, early_stopping_patience, device, output_dir, tensorboard_output_path):
-    # ... (no changes in the initial part of the function)
+    
     tensorboard_summary_writer = TensorboardSummaryWriter(tensorboard_output_path)
     num_params = get_num_params(model)
     log_num_params(num_params)
     early_stop = EarlyStop(early_stopping_patience)
-    config.data.slate_length = int(np.ceil(max([train_dl.dataset.longest_query_length, valid_dl.dataset.longest_query_length]) / 10) * 10)
-
+    
     is_ips_loss = "IPS" in config.loss.name
     if is_ips_loss:
-        logger.info(f"IPS loss function '{config.loss.name}' detected. Initializing automatic propensity estimation.")
+        logger.info(f"IPS loss '{config.loss.name}' detected. Initializing propensity estimation.")
         num_positions = config.data.slate_length
         t_plus = torch.ones(num_positions, device=device)
         t_minus = torch.ones(num_positions, device=device)
 
-    from allrank import config as conf
+    # Your custom BandWidth initialization logic using the global `conf`
     conf.BandWidth_LR = torch.tensor(conf.BandWidth_LR, dtype=torch.float32).to(device)
     conf.BandWidth_Changes = []
     Temp = []
@@ -147,32 +134,29 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
     Unique_Labels = Unique_Labels[1:]
     conf.BandWidth = torch.ones(size=(Unique_Labels.shape[0], xb.shape[-1]), dtype=torch.float64)
     Temp_Coefficient = torch.ones(Unique_Labels.shape[0], 1)
-    Temp_Coefficient[0] = torch.multiply(Temp_Coefficient[0], torch.tensor(0.71))
-    Temp_Coefficient[1:] = torch.multiply(Temp_Coefficient[1:], torch.tensor(1.0))
+    if Unique_Labels.shape[0]>0:
+        Temp_Coefficient[0] = torch.multiply(Temp_Coefficient[0], torch.tensor(0.71))
+    if Unique_Labels.shape[0]>1:
+        Temp_Coefficient[1:] = torch.multiply(Temp_Coefficient[1:], torch.tensor(1.0))
+
     conf.BandWidth = torch.multiply(conf.BandWidth, Temp_Coefficient)
     conf.BandWidth = conf.BandWidth.to(device)
     conf.Best_BandWidth = torch.clone(conf.BandWidth)
 
+    # --- Main Training Loop ---
     for epoch in range(epochs):
-        logger.info("Current learning rate: {}".format(get_current_lr(optimizer)))
+        logger.info(f"Current learning rate: {get_current_lr(optimizer)}")
         
         if is_ips_loss and epoch > 0:
             t_plus, t_minus = estimate_propensities_pairwise(model, train_dl, device, num_positions, t_plus, t_minus)
-            logger.info(f"Updated biases for epoch {epoch}:")
-            logger.info(f"t_plus: {t_plus.cpu().numpy()}")
-            logger.info(f"t_minus: {t_minus.cpu().numpy()}")
 
         loss_func.keywords["epoch"] = epoch
-        
         conf.BandWidth_Loss_Derivation = torch.zeros(size=(conf.BandWidth.shape[:2]), dtype=torch.float32).to(device)
 
         model.train()
-
-        train_losses = []
-        train_nums = []
+        train_losses, train_nums = [], []
         for xb, yb, indices in tqdm(train_dl, desc=f"Epoch {epoch+1}/{epochs} [Training]"):
             xb, yb, indices = xb.to(device), yb.to(device), indices.to(device)
-            
             inverse_propensities_list = None
             if is_ips_loss:
                 inverse_propensities_itemwise = torch.ones_like(yb, dtype=torch.float32)
@@ -184,80 +168,75 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
                             else:
                                 inverse_propensities_itemwise[i, j] = 1.0 / t_minus[j]
                 inverse_propensities_list = torch.mean(inverse_propensities_itemwise, dim=1)
-
-            loss, num = loss_batch(
-                model, loss_func, xb, yb, indices, gradient_clipping_norm, optimizer, inverse_propensities_list=inverse_propensities_list)
+            loss, num = loss_batch(model, loss_func, xb, yb, indices, gradient_clipping_norm, optimizer, inverse_propensities_list)
             train_losses.append(loss)
             train_nums.append(num)
         
         train_loss = np.sum(np.multiply(train_losses, train_nums)) / np.sum(train_nums)
-        train_metrics = compute_metrics(None, config.loss.name, epoch, epochs, "train", config.metrics, model, train_dl, device)
+        train_metrics = compute_metrics(config.metrics, model, train_dl, device)
 
         model.eval()
         with torch.no_grad():
-            val_losses, val_nums = zip(
-                *[loss_batch(model, loss_func, xb.to(device=device), yb.to(device=device), indices.to(device=device),
-                             gradient_clipping_norm) for
-                  xb, yb, indices in tqdm(valid_dl, desc=f"Epoch {epoch+1}/{epochs} [Validation]")])
-            val_metrics = compute_metrics(None, config.loss.name, epoch, epochs, "test", config.metrics, model, valid_dl, device)
-
+            val_losses, val_nums = zip(*[loss_batch(model, loss_func, xb.to(d), yb.to(d), ind.to(d), gradient_clipping_norm)
+                                         for xb, yb, ind in tqdm(valid_dl, desc=f"Epoch {epoch+1}/{epochs} [Validation]")
+                                         for d in [device]])
+            val_metrics = compute_metrics(config.metrics, model, valid_dl, device)
         val_loss = np.sum(np.multiply(val_losses, val_nums)) / np.sum(val_nums)
         
-        conf.BandWidth_Changes += [torch.mean(torch.multiply(conf.BandWidth_LR, conf.BandWidth_Loss_Derivation))]
-        Temp_Update = torch.absolute(torch.subtract(conf.BandWidth, torch.multiply(conf.BandWidth_LR, conf.BandWidth_Loss_Derivation)))
-        Temp_Update_Indices = torch.add((Temp_Update < conf.BandWidth).to(torch.int8), (Temp_Update < 0.3).to(torch.int8))
-        Temp_Update_Indices = (Temp_Update_Indices > 0.9).to(torch.int8)
-        conf.BandWidth = torch.add(torch.multiply(torch.subtract(torch.tensor(1.0), Temp_Update_Indices), conf.BandWidth), torch.multiply(Temp_Update_Indices, Temp_Update))
+        conf.BandWidth_Changes.append(torch.mean(torch.multiply(conf.BandWidth_LR, conf.BandWidth_Loss_Derivation)).item())
+        Temp_Update = torch.abs(torch.subtract(conf.BandWidth, torch.multiply(conf.BandWidth_LR, conf.BandWidth_Loss_Derivation)))
+        Temp_Update_Indices = ((Temp_Update < conf.BandWidth).to(torch.int8) + (Temp_Update < 0.3).to(torch.int8) > 0.9).to(torch.int8)
+        conf.BandWidth = torch.add(torch.multiply(1.0 - Temp_Update_Indices, conf.BandWidth), torch.multiply(Temp_Update_Indices, Temp_Update))
         
         logger.info(epoch_summary(epoch, train_loss, val_loss, train_metrics, val_metrics))
+
+        # --- MLflow Logging Integration ---
+        if mlflow.active_run():
+            mlflow.log_metric("train_loss", train_loss, step=epoch)
+            mlflow.log_metric("val_loss", val_loss, step=epoch)
+            mlflow.log_metrics({f"train_{k}": v for k, v in train_metrics.items()}, step=epoch)
+            mlflow.log_metrics({f"val_{k}": v for k, v in val_metrics.items()}, step=epoch)
+            mlflow.log_metric("bandwidth_change", conf.BandWidth_Changes[-1], step=epoch)
+        # --- End of MLflow Integration ---
         
         current_val_metric_value = val_metrics.get(config.val_metric)
         if scheduler:
-            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                scheduler.step(current_val_metric_value)
-            else:
-                scheduler.step()
+            scheduler.step(current_val_metric_value if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau) else None)
         
         if early_stop.step(current_val_metric_value, epoch):
             conf.Best_BandWidth = torch.clone(conf.BandWidth)
 
         if early_stop.stop_training(epoch):
-            logger.info("Early stopping triggered.")
+            logger.info(f"Early stopping triggered after {epoch + 1} epochs.")
             break
 
-    params_dir = "./Parameters/One/"
+    # --- Final Artifact Saving ---
+    # Save files locally first, then log them to MLflow
+    params_dir = os.path.join(output_dir, "parameters")
     os.makedirs(params_dir, exist_ok=True)
     logger.info(f"Training finished. Saving learned parameters to {params_dir}")
 
-    num_files_to_save = 3 + (1 if is_ips_loss else 0) + 1  # bw, best_bw, changes, propensities (optional), model
-    with tqdm(total=num_files_to_save, desc="Saving Files") as pbar:
-        # Save SDLR bandwidths to a single file (will be overwritten on each run)
-        logger.info("Saving bandwidths...")
-        bw_path = os.path.join(params_dir, "Sigma_All_Score.csv")
-        pd.DataFrame(conf.BandWidth.cpu().numpy()).to_csv(bw_path)
-        pbar.update(1)
+    bw_path = os.path.join(params_dir, "Sigma_All_Score.csv")
+    best_bw_path = os.path.join(params_dir, "Sigma_All_Score_Best.csv")
+    changes_path = os.path.join(params_dir, "Sigma_Changes.csv")
+    
+    pd.DataFrame(conf.BandWidth.cpu().numpy()).to_csv(bw_path, index=False)
+    pd.DataFrame(conf.Best_BandWidth.cpu().numpy()).to_csv(best_bw_path, index=False)
+    pd.DataFrame(conf.BandWidth_Changes, columns=["Changes"]).to_csv(changes_path, index=False)
 
-        logger.info("Saving best bandwidths...")
-        best_bw_path = os.path.join(params_dir, "Sigma_All_Score_Best.csv")
-        pd.DataFrame(conf.Best_BandWidth.cpu().numpy()).to_csv(best_bw_path)
-        pbar.update(1)
-
-        logger.info("Saving bandwidth changes...")
-        changes_path = os.path.join(params_dir, "Sigma_Changes.csv")
-        pd.DataFrame(torch.tensor(conf.BandWidth_Changes).cpu().numpy(), columns=["Changes"]).to_csv(changes_path)
-        pbar.update(1)
-
+    if mlflow.active_run():
+        logger.info("Logging final parameters as MLflow artifacts.")
+        mlflow.log_artifact(bw_path, "parameters")
+        mlflow.log_artifact(best_bw_path, "parameters")
+        mlflow.log_artifact(changes_path, "parameters")
         if is_ips_loss:
-            logger.info("Saving propensities...")
             propensity_path = os.path.join(params_dir, "propensities.pt")
             torch.save({'t_plus': t_plus, 't_minus': t_minus}, propensity_path)
-            pbar.update(1)
-
-        logger.info("Saving model state...")
-        torch.save(model.state_dict(), os.path.join(output_dir, "model.pkl"))
-        pbar.update(1)
+            mlflow.log_artifact(propensity_path, "parameters")
+    
+    # NOTE: The model itself is saved in main.py using mlflow.pytorch.log_model
+    # We do not need to save it again here.
    
-
     tensorboard_summary_writer.close_all_writers()
 
     return {

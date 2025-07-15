@@ -7,6 +7,8 @@
 
 # --- Python specific ---
 
+results/
+mlruns/
 # Virtual environments
 env/
 myenv/
