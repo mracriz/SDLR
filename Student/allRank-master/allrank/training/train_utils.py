@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch.nn.utils import clip_grad_norm_
 from pathlib import Path
-import mlflow  # Import MLflow
+import mlflow
 
 import allrank.models.metrics as metrics_module
 from allrank.data.dataset_loading import PADDED_Y_VALUE
@@ -31,7 +31,7 @@ def loss_batch(model, loss_func, xb, yb, indices, gradient_clipping_norm, opt=No
         opt.zero_grad()
     return loss.item(), len(xb)
 
-# Note: The unused parameters (path, name, etc.) are kept to match your original function signature
+# Os parâmetros não utilizados (path, name, etc.) são mantidos para corresponder à sua assinatura de função original
 def metric_on_batch(path, name, epoch, epochs, flag, metric, model, xb, yb, indices):
     mask = (yb == PADDED_Y_VALUE)
     y_pred_scores = model.score(xb, mask, indices)
@@ -132,13 +132,12 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
         
         logger.info(epoch_summary(epoch, train_loss, val_loss, train_metrics, val_metrics))
 
-        # --- MLflow Logging Integration ---
+        # Integração de Log com MLflow
         if mlflow.active_run():
             mlflow.log_metric("train_loss", train_loss, step=epoch)
             mlflow.log_metric("val_loss", val_loss, step=epoch)
             mlflow.log_metrics({f"train_{k}": v for k, v in train_metrics.items()}, step=epoch)
             mlflow.log_metrics({f"val_{k}": v for k, v in val_metrics.items()}, step=epoch)
-        # --- End of MLflow Integration ---
         
         current_val_metric_value = val_metrics.get(config.val_metric)
         if scheduler:
@@ -147,14 +146,18 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
             else:
                 scheduler.step()
         
-        # Using the original, correct early stopping logic
+        # Usando a lógica original de early stopping que estava funcionando
         early_stop.step(current_val_metric_value, epoch)
         if early_stop.stop_training(epoch):
             logger.info("Early stopping triggered.")
             break
 
     logger.info("Student training finished.")
-    # The model is saved by main.py using mlflow.pytorch.log_model, so we don't save it here.
+
+    # Salvando uma cópia local do modelo para o passo de inferência
+    torch.save(model, os.path.join(output_dir, "model.pkl"))
+    logger.info(f"Model saved locally to {os.path.join(output_dir, 'model.pkl')}")
+    
     tensorboard_summary_writer.close_all_writers()
 
     return {
