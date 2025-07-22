@@ -5,7 +5,7 @@ import pandas as pd
 import torch
 from torch.nn.utils import clip_grad_norm_
 from tqdm import tqdm
-import mlflow  # <-- Import MLflow
+import mlflow
 
 import allrank.models.metrics as metrics_module
 from allrank.data.dataset_loading import PADDED_Y_VALUE
@@ -13,13 +13,10 @@ from allrank.models.model_utils import get_num_params, log_num_params
 from allrank.training.early_stop import EarlyStop
 from allrank.utils.ltr_logging import get_logger
 from allrank.utils.tensorboard_utils import TensorboardSummaryWriter
-from allrank import config as conf # Use `conf` for global parameters
+from allrank import config as conf
 
 logger = get_logger()
 
-# =================================================================================
-# Helper functions (Your original code - no changes needed here)
-# =================================================================================
 
 def estimate_propensities_pairwise(model, dataloader, device, num_positions, t_plus, t_minus):
     logger.info("Estimating propensities...")
@@ -105,9 +102,6 @@ def epoch_summary(epoch, train_loss, val_loss, train_metrics, val_metrics):
 def get_current_lr(optimizer):
     return optimizer.param_groups[0]["lr"]
 
-# =================================================================================
-# Main `fit` function with MLflow Integration
-# =================================================================================
 
 def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, config,
         gradient_clipping_norm, early_stopping_patience, device, output_dir, tensorboard_output_path):
@@ -124,7 +118,6 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
         t_plus = torch.ones(num_positions, device=device)
         t_minus = torch.ones(num_positions, device=device)
 
-    # Your custom BandWidth initialization logic using the global `conf`
     conf.BandWidth_LR = torch.tensor(conf.BandWidth_LR, dtype=torch.float32).to(device)
     conf.BandWidth_Changes = []
     Temp = []
@@ -134,19 +127,17 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
     Unique_Labels = Unique_Labels[1:]
     conf.BandWidth = torch.ones(size=(Unique_Labels.shape[0], xb.shape[-1]), dtype=torch.float64)
     Temp_Coefficient = torch.ones(Unique_Labels.shape[0], 1)
-    if Unique_Labels.shape[0]>0:
+    if Unique_Labels.shape[0] > 0:
         Temp_Coefficient[0] = torch.multiply(Temp_Coefficient[0], torch.tensor(0.71))
-    if Unique_Labels.shape[0]>1:
+    if Unique_Labels.shape[0] > 1:
         Temp_Coefficient[1:] = torch.multiply(Temp_Coefficient[1:], torch.tensor(1.0))
 
     conf.BandWidth = torch.multiply(conf.BandWidth, Temp_Coefficient)
     conf.BandWidth = conf.BandWidth.to(device)
     conf.Best_BandWidth = torch.clone(conf.BandWidth)
 
-    # --- Main Training Loop ---
     for epoch in range(epochs):
         logger.info(f"Current learning rate: {get_current_lr(optimizer)}")
-        
         if is_ips_loss and epoch > 0:
             t_plus, t_minus = estimate_propensities_pairwise(model, train_dl, device, num_positions, t_plus, t_minus)
 
@@ -190,18 +181,19 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
         
         logger.info(epoch_summary(epoch, train_loss, val_loss, train_metrics, val_metrics))
 
-        # --- MLflow Logging Integration ---
         if mlflow.active_run():
             mlflow.log_metric("train_loss", train_loss, step=epoch)
             mlflow.log_metric("val_loss", val_loss, step=epoch)
             mlflow.log_metrics({f"train_{k}": v for k, v in train_metrics.items()}, step=epoch)
             mlflow.log_metrics({f"val_{k}": v for k, v in val_metrics.items()}, step=epoch)
             mlflow.log_metric("bandwidth_change", conf.BandWidth_Changes[-1], step=epoch)
-        # --- End of MLflow Integration ---
         
         current_val_metric_value = val_metrics.get(config.val_metric)
         if scheduler:
-            scheduler.step(current_val_metric_value if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau) else None)
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(current_val_metric_value)
+            else:
+                scheduler.step()
         
         if early_stop.step(current_val_metric_value, epoch):
             conf.Best_BandWidth = torch.clone(conf.BandWidth)
@@ -210,8 +202,6 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
             logger.info(f"Early stopping triggered after {epoch + 1} epochs.")
             break
 
-    # --- Final Artifact Saving ---
-    # Save files locally first, then log them to MLflow
     params_dir = os.path.join(output_dir, "parameters")
     os.makedirs(params_dir, exist_ok=True)
     logger.info(f"Training finished. Saving learned parameters to {params_dir}")
@@ -219,7 +209,6 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
     bw_path = os.path.join(params_dir, "Sigma_All_Score.csv")
     best_bw_path = os.path.join(params_dir, "Sigma_All_Score_Best.csv")
     changes_path = os.path.join(params_dir, "Sigma_Changes.csv")
-    
     pd.DataFrame(conf.BandWidth.cpu().numpy()).to_csv(bw_path, index=False)
     pd.DataFrame(conf.Best_BandWidth.cpu().numpy()).to_csv(best_bw_path, index=False)
     pd.DataFrame(conf.BandWidth_Changes, columns=["Changes"]).to_csv(changes_path, index=False)
@@ -230,12 +219,10 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
         mlflow.log_artifact(best_bw_path, "parameters")
         mlflow.log_artifact(changes_path, "parameters")
         if is_ips_loss:
+            # Salva o arquivo de propensidades com um nome estático e previsível
             propensity_path = os.path.join(params_dir, "propensities.pt")
             torch.save({'t_plus': t_plus, 't_minus': t_minus}, propensity_path)
             mlflow.log_artifact(propensity_path, "parameters")
-    
-    # NOTE: The model itself is saved in main.py using mlflow.pytorch.log_model
-    # We do not need to save it again here.
    
     tensorboard_summary_writer.close_all_writers()
 

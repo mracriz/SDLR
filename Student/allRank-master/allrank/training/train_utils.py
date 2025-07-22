@@ -84,15 +84,22 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
     if is_ips_loss:
         num_positions = config.data.slate_length
         try:
-            base_path = Path(os.getcwd()).parent.parent.parent / "Teacher" / "allRank-master" / "allrank" / "Parameters" / "One"
-            propensity_path = base_path / f"propensities_{params_path_name}.pt"
+            # Constrói o caminho robusto para a pasta de parâmetros do Teacher
+            project_root = Path(os.getcwd()).parent.parent
+            # Usa o nome da pasta de resultados estática do Teacher
+            teacher_results_dir = project_root / "Teacher" / "allRank-master" / "allrank" / "results" / "teacher_run"
+            teacher_params_dir = teacher_results_dir / "parameters"
+            # Carrega o arquivo de propensidades com nome estático
+            propensity_path = teacher_params_dir / "propensities.pt"
+
             logger.info(f"Student (IPS): loading propensities from {propensity_path}")
             propensities = torch.load(propensity_path)
             t_plus = propensities['t_plus'].to(device)
             t_minus = propensities['t_minus'].to(device)
         except FileNotFoundError:
-            logger.error(f"Propensity file not found for student model at {propensity_path}. Please run the teacher first.")
-            return
+            logger.error(f"Propensity file not found for student model at {propensity_path}. Please run the teacher first with an IPS loss.")
+            # Retorna um dicionário vazio para evitar o crash de 'NoneType' no main.py
+            return {}
 
     for epoch in range(epochs):
         logger.info(f"Current learning rate: {get_current_lr(optimizer)}")
@@ -146,18 +153,14 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
             else:
                 scheduler.step()
         
-        # Usando a lógica original de early stopping que estava funcionando
         early_stop.step(current_val_metric_value, epoch)
         if early_stop.stop_training(epoch):
             logger.info("Early stopping triggered.")
             break
 
     logger.info("Student training finished.")
-
-    # Salvando uma cópia local do modelo para o passo de inferência
     torch.save(model, os.path.join(output_dir, "model.pkl"))
     logger.info(f"Model saved locally to {os.path.join(output_dir, 'model.pkl')}")
-    
     tensorboard_summary_writer.close_all_writers()
 
     return {

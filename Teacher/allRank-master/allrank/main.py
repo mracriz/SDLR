@@ -141,6 +141,6 @@ def run():
 if __name__ == "__main__":
     from allrank import config as conf
     conf.Noise_Percent = 0.2
-    conf.Max_Noise = -1.0 
+    conf.Max_Noise = 0.0 
     conf.Data_Percent = 0.8
     run()
