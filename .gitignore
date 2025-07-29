@@ -1,5 +1,20 @@
 *.DS_Store
 
+# MLflow
+mlruns/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Notebooks
+.ipynb_checkpoints
+
+# Resultados de experimentos e modelos
+Teacher/allRank-master/allrank/results/
+Student/allRank-master/allrank/results/
+*.pkl
+
 *.pt
 
 # Ignore all .csv files
@@ -7,7 +22,7 @@
 
 # --- Python specific ---
 
-*results/
+results/
 mlruns/
 # Virtual environments
 env/
