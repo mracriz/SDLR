@@ -19,7 +19,7 @@
     }
   },
   "data": {
-    "path": "/Users/david/Documents/phd/JusbrasilData/bq_processed/normalized/svm-rank_format/click/DCM",
+    "path": "/home/david.acris/Documents/data/svm-rank_format/copy/DBN",
     "validation_ds_role": "test",
     "num_workers": 0,
     "batch_size": 32,

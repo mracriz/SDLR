@@ -37,7 +37,7 @@ def parse_args():
     )
     parser.add_argument(
         "--inference_data",
-        default="/Users/david/Documents/phd/JusbrasilData/colecao_especialistas/manual_svm_252.txt",
+        default="/home/david.acris/Documents/data/manual_collection/manual_svm_252.txt",
         help="Caminho absoluto para o arquivo SVM de avaliação."
     )
     parser.add_argument(

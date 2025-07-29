@@ -19,7 +19,7 @@
     }
   },
   "data": {
-    "path": "/home/david.acris/Documents/data/svm-rank_format/click/SDBN2",
+    "path": "/home/david.acris/Documents/data/svm-rank_format/click/DCM",
     "validation_ds_role": "test",
     "num_workers": 0,
     "batch_size": 32,
@@ -68,13 +68,9 @@
     "mrr_10",
     "mrr_20"
   ],
-  "loss": {
-    "name": "listSDStu",
-
-    "args": {
-      "epoch": "a",
-      "Parameters_Path": "b"
-    }
+    "loss": {
+    "name": "neuralNDCG",
+    "args": {}
   },
   "detect_anomaly": false,
   "expected_metrics" : {
