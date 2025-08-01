@@ -14,4 +14,5 @@ from .listSD import *
 from .listSD_MSLR import *
 from .listSDStu import *
 from .listSD_IPS import *
+from .neuralNDCG_IPS import *
 

@@ -17,9 +17,11 @@ from allrank import config as conf
 
 logger = get_logger()
 
-# ... (todas as funções auxiliares como estimate_propensities_pairwise, loss_batch, etc., permanecem inalteradas) ...
+
 def estimate_propensities_pairwise(model, dataloader, device, num_positions, t_plus, t_minus):
-    # ... (código inalterado)
+    """
+    Estima as propensões de clique (bias) para o treino com IPS.
+    """
     logger.info("Estimating propensities...")
     model.eval()
     t_plus_num = torch.zeros(num_positions, device=device)
@@ -50,6 +52,9 @@ def estimate_propensities_pairwise(model, dataloader, device, num_positions, t_p
 
 
 def loss_batch(model, loss_func, xb, yb, indices, gradient_clipping_norm, opt=None, inverse_propensities_list=None, is_sd_loss=False):
+    """
+    Calcula a perda para um único lote, passando argumentos extras condicionalmente.
+    """
     mask = (yb == PADDED_Y_VALUE)
     loss_kwargs = {}
     if is_sd_loss:
@@ -118,15 +123,31 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
     is_sd_loss = "listSD" in config.loss.name
 
     if is_ips_loss:
-        # ... (lógica IPS inalterada)
-        pass
+        logger.info(f"IPS loss '{config.loss.name}' detected. Initializing propensities.")
+        num_positions = config.data.slate_length
+        t_plus = torch.ones(num_positions, device=device)
+        t_minus = torch.ones(num_positions, device=device)
 
     if is_sd_loss:
-        # ... (lógica de bandwidth inalterada)
-        pass
+        conf.BandWidth_LR = torch.tensor(conf.BandWidth_LR, dtype=torch.float32).to(device)
+        conf.BandWidth_Changes = []
+        Temp = []
+        for xb, yb, indices in train_dl:
+            Temp += torch.unique(yb).tolist()
+        Unique_Labels = torch.sort(torch.unique(torch.tensor(Temp))).values
+        Unique_Labels = Unique_Labels[1:]
+        conf.BandWidth = torch.ones(size=(Unique_Labels.shape[0], xb.shape[-1]), dtype=torch.float64)
+        Temp_Coefficient = torch.ones(Unique_Labels.shape[0], 1)
+        if Unique_Labels.shape[0] > 0:
+            Temp_Coefficient[0] = torch.multiply(Temp_Coefficient[0], torch.tensor(0.71))
+        if Unique_Labels.shape[0] > 1:
+            Temp_Coefficient[1:] = torch.multiply(Temp_Coefficient[1:], torch.tensor(1.0))
+
+        conf.BandWidth = torch.multiply(conf.BandWidth, Temp_Coefficient)
+        conf.BandWidth = conf.BandWidth.to(device)
+        conf.Best_BandWidth = torch.clone(conf.BandWidth)
 
     for epoch in range(epochs):
-        # ... (loop de treino inalterado) ...
         logger.info(f"Current learning rate: {get_current_lr(optimizer)}")
         if is_ips_loss and epoch > 0:
             t_plus, t_minus = estimate_propensities_pairwise(model, train_dl, device, num_positions, t_plus, t_minus)
@@ -150,7 +171,8 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
                             else:
                                 inverse_propensities_itemwise[i, j] = 1.0 / t_minus[j]
                 inverse_propensities_list = torch.mean(inverse_propensities_itemwise, dim=1)
-            loss, num = loss_batch(model, loss_func, xb, yb, indices, gradient_clipping_norm, optimizer, inverse_propensities_list, is_sd_loss=is_sd_loss)
+                
+            loss, num = loss_batch(model, loss_func, xb, yb, indices, gradient_clipping_norm, optimizer, inverse_propensities_list, is_sd_loss)
             train_losses.append(loss)
             train_nums.append(num)
         
@@ -193,19 +215,18 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
                 conf.Best_BandWidth = torch.clone(conf.BandWidth)
 
         if early_stop.stop_training(epoch):
-            logger.info("Early stopping triggered after {epoch + 1} epochs.")
+            logger.info(f"Early stopping triggered.")
             break
 
-    params_dir = os.path.join(output_dir, "parameters")
-    os.makedirs(params_dir, exist_ok=True)
-    logger.info(f"Training finished. Saving artifacts to {output_dir}")
-
-    # --- ESTA É A CORREÇÃO ---
-    # Salva uma cópia local do modelo para o passo de inferência, independentemente da perda.
+    logger.info("Training finished.")
+    # Salva o modelo localmente para a etapa de inferência
     torch.save(model, os.path.join(output_dir, "model.pkl"))
     logger.info(f"Model saved locally to {os.path.join(output_dir, 'model.pkl')}")
-    # --- FIM DA CORREÇÃO ---
-
+    
+    # Salva os artefatos de parâmetros no final do treino (se aplicável)
+    params_dir = os.path.join(output_dir, "parameters")
+    os.makedirs(params_dir, exist_ok=True)
+    
     if is_sd_loss:
         bw_path = os.path.join(params_dir, "Sigma_All_Score.csv")
         best_bw_path = os.path.join(params_dir, "Sigma_All_Score_Best.csv")
@@ -213,17 +234,18 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
         pd.DataFrame(conf.BandWidth.cpu().numpy()).to_csv(bw_path, index=False)
         pd.DataFrame(conf.Best_BandWidth.cpu().numpy()).to_csv(best_bw_path, index=False)
         pd.DataFrame(conf.BandWidth_Changes, columns=["Changes"]).to_csv(changes_path, index=False)
-
         if mlflow.active_run():
-            logger.info("Logging final parameters as MLflow artifacts.")
             mlflow.log_artifact(bw_path, "parameters")
             mlflow.log_artifact(best_bw_path, "parameters")
             mlflow.log_artifact(changes_path, "parameters")
-            if is_ips_loss:
-                propensity_path = os.path.join(params_dir, "propensities.pt")
-                torch.save({'t_plus': t_plus, 't_minus': t_minus}, propensity_path)
-                mlflow.log_artifact(propensity_path, "parameters")
-   
+
+    if is_ips_loss:
+        propensity_path = os.path.join(params_dir, "propensities.pt")
+        torch.save({'t_plus': t_plus, 't_minus': t_minus}, propensity_path)
+        logger.info(f"Propensities saved locally to {propensity_path}")
+        if mlflow.active_run():
+            mlflow.log_artifact(propensity_path, "parameters")
+
     tensorboard_summary_writer.close_all_writers()
 
     return {
