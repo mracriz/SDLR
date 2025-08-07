@@ -13,12 +13,10 @@ from torch import optim
 import mlflow
 import mlflow.pytorch
 
-# --- Path Correction ---
 script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(script_dir)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-# --- End of Path Correction ---
 
 from allrank.config import Config
 from allrank.data.dataset_loading import load_libsvm_dataset, create_data_loaders
@@ -30,8 +28,8 @@ from allrank.utils.experiments import dump_experiment_result, assert_expected_me
 from allrank.utils.ltr_logging import init_logger
 from allrank.utils.python_utils import dummy_context_mgr
 from allrank.models import losses
+from allrank import config as conf  
 
-# Helper function
 def flatten(d, parent_key='', sep='.'):
     items = []
     for k, v in d.items():
@@ -43,11 +41,15 @@ def flatten(d, parent_key='', sep='.'):
     return dict(items)
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="allRank: an open-source learning-to-rank library")
+    parser = argparse.ArgumentParser(description="Script de treino allRank (Teacher/Student)")
     parser.add_argument("--job_dir", required=True)
     parser.add_argument("--run_id", required=True)
     parser.add_argument("--config_file_name", required=True)
-    parser.add_argument("--mlflow_run_id", default=None, help="MLflow Run ID to resume logging to.")
+    parser.add_argument("--mlflow_run_id", default=None, help="ID da execução do MLflow para continuar o log.")
+    
+    parser.add_argument("--noise_percent", type=float, default=0.0)
+    parser.add_argument("--max_noise", type=float, default=0.0)
+    parser.add_argument("--data_percent", type=float, default=1.0)
     return parser.parse_args()
 
 
@@ -57,6 +59,10 @@ def run():
     np.random.seed(42)
 
     args = parse_args()
+
+    conf.Noise_Percent = args.noise_percent
+    conf.Max_Noise = args.max_noise
+    conf.Data_Percent = args.data_percent
 
     paths = PathsContainer.from_args(args.job_dir, args.run_id, args.config_file_name)
     create_output_dirs(paths.output_dir)
@@ -78,14 +84,13 @@ def run():
                 config_dict[attr] = value
         
         flattened_config = flatten(config_dict)
-
         mlflow.log_params(flattened_config)
-        from allrank import config as conf
         mlflow.log_param("noise_percent", conf.Noise_Percent)
         mlflow.log_param("max_noise", conf.Max_Noise)
+        mlflow.log_param("data_percent", conf.Data_Percent)
         mlflow.log_artifact(paths.config_path, "config")
 
-        # Load data
+        # Carrega os dados
         train_ds, val_ds = load_libsvm_dataset(
             input_path=config.data.path,
             slate_length=config.data.slate_length,
@@ -98,7 +103,6 @@ def run():
         dev = get_torch_device()
         logger.info(f"Model training will execute on {dev.type}")
 
-        # Create model and optimizer
         model = make_model(
             n_features=n_features,
             fc_model=config.model.fc_model,
@@ -113,10 +117,9 @@ def run():
         loss_func = partial(getattr(losses, config.loss.name), **config.loss.args)
         scheduler = getattr(optim.lr_scheduler, config.lr_scheduler.name)(optimizer, **config.lr_scheduler.args) if config.lr_scheduler.name else None
         
-        # This parameter is used by both original scripts
+        # Parâmetro necessário para as perdas SDLR
         conf.BandWidth_LR = 1e-4
 
-        # Run training
         with dummy_context_mgr():
             result = fit(
                 model=model, loss_func=loss_func, optimizer=optimizer, scheduler=scheduler,
@@ -126,29 +129,18 @@ def run():
                 early_stopping_patience=config.training.early_stopping_patience
             )
 
-        # Log model and final metrics
-        mlflow.pytorch.log_model(model, "model")
-        logger.info("Modelo PyTorch salvo como artefato no MLflow.")
         if result:
+            mlflow.pytorch.log_model(model, "model")
+            logger.info("Modelo PyTorch salvo como artefato no MLflow.")
             final_metrics = {f"final_{role}_{m}": v for role, metrics_dict in result.items() if isinstance(metrics_dict, dict) for m, v in metrics_dict.items()}
             mlflow.log_metrics(final_metrics)
+            dump_experiment_result(args, config, paths.output_dir, result)
+            assert_expected_metrics(result, config.expected_metrics)
+        else:
+            logger.warning("O treino não produziu resultados (pode ter falhado ou sido interrompido).")
 
-        dump_experiment_result(args, config, paths.output_dir, result)
         if urlparse(args.job_dir).scheme == "gs":
             copy_local_to_gs(paths.local_base_output_path, args.job_dir)
-        assert_expected_metrics(result, config.expected_metrics)
 
 if __name__ == "__main__":
-    from allrank import config as conf
-    
-    # SDLR
-    # conf.Noise_Percent = 0.2
-    # conf.Max_Noise = 0.0 
-    # conf.Data_Percent = 0.8
-
-    #Single Models
-    conf.Noise_Percent = 0.0
-    conf.Max_Noise = 0.0 
-    conf.Data_Percent = 1.0
-
     run()

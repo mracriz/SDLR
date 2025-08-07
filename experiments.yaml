@@ -1,0 +1,29 @@
+# Este é o seu painel de controle para todos os experimentos.
+
+sdlr_experiment:
+  name: "sdlr"
+  teacher:
+    config_template: "configs/teacher/sdlr_config.json"
+    data_path: "/home/david.acris/Documents/data/svm-rank_format/click/DCM"
+  student:
+    config_template: "configs/student/sdlr_student_config.json"
+    data_path: "/home/david.acris/Documents/data/svm-rank_format/click/DCM"
+  #set null if theres no inference data
+  inference_data: null
+  # --- SDLR parameters ---
+  data_options:
+    noise_percent: 0.2
+    max_noise: 0.0
+    data_percent: 0.8
+
+single_model_baseline:
+  name: "single"
+  model:
+    base_dir: "Teacher/allRank-master" 
+    config_template: "configs/baselines/neural_ndcg_config.json"
+    data_path: "/path/to/data/svm-format.txt"
+  # Do not change (for non-SDLR models) ---
+  data_options:
+    noise_percent: 0.0
+    max_noise: 0.0
+    data_percent: 1.0
