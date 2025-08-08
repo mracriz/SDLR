@@ -1,28 +1,29 @@
-# Este é o seu painel de controle para todos os experimentos.
+# This is the main control panel for all experiments.
+# Run an experiment by its name, e.g., `python3 main.py sdlr_ips_run`
 
 sdlr_experiment:
+  experiment_name: "IPS_Click"  # Nome que aparecerá no MLflow
   name: "sdlr"
   teacher:
-    config_template: "configs/teacher/sdlr_config.json"
-    data_path: "/home/david.acris/Documents/data/svm-rank_format/click/DCM"
+    config_template: "configs/teacher/ips_config.json"
+    data_path: "/home/david.acris/Documents/data/svm-rank_format/click/IPS2"
   student:
-    config_template: "configs/student/sdlr_student_config.json"
-    data_path: "/home/david.acris/Documents/data/svm-rank_format/click/DCM"
-  #set null if theres no inference data
-  inference_data: null
-  # --- SDLR parameters ---
+    config_template: "configs/student/sdlr_student_IPS_config.json"
+    data_path: "/home/david.acris/Documents/data/svm-rank_format/click/IPS2"
+  inference_data: "/home/david.acris/Documents/data/manual_collection/manual_svm_252.txt"
   data_options:
     noise_percent: 0.2
-    max_noise: 0.0
+    max_noise: -1.0
     data_percent: 0.8
 
-single_model_baseline:
+neural_ndcg_baseline:
+  experiment_name: "NeuralNDCG_Baseline" # Nome que aparecerá no MLflow
   name: "single"
   model:
-    base_dir: "Teacher/allRank-master" 
+    base_dir: "Teacher/allRank-master"
     config_template: "configs/baselines/neural_ndcg_config.json"
-    data_path: "/path/to/data/svm-format.txt"
-  # Do not change (for non-SDLR models) ---
+    data_path: "/path/to/your/baseline/data"
+  inference_data: "/path/to/your/final_test_set.txt"
   data_options:
     noise_percent: 0.0
     max_noise: 0.0
