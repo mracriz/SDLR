@@ -175,7 +175,7 @@ def main():
             print("NDCG metrics and scores CSV logged to MLflow.")
     else:
         print("No MLflow Run ID provided. Printing metrics locally.")
-        ks = [1, 3, 5, 10, 20]
+        ks = [1, 3, 5, 10]
         grouped = df_results.groupby('query_id')
         for k in ks:
             avg_ndcg = grouped.apply(lambda g: ndcg_at_k(g, k)).mean()

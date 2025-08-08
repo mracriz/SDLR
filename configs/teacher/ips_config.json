@@ -15,14 +15,14 @@
     },
     "post_model": {
       "output_activation": null,
-      "d_output": 6
+      "d_output": 1
     }
   },
   "data": {
-    "path": "/home/david.acris/Documents/data/svm-rank_format/copy/DCM",
-    "validation_ds_role": "test",
+    "path": "PLACEHOLDER_DATA_PATH",
+    "validation_ds_role": "vali",
     "num_workers": 0,
-    "batch_size": 64,
+    "batch_size": 32,
     "slate_length": 240
   },
   "optimizer": {
@@ -69,9 +69,11 @@
     "mrr_20"
   ],
   "loss": {
-    "name": "ordinal",
+    "name": "listSD_IPS",
+
     "args": {
-      "n": 6
+      "epoch": "a",
+      "Parameters_Path": "b"
     }
   },
   "detect_anomaly": false,
