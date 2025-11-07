@@ -7,130 +7,243 @@ from allrank.models.metrics import dcg
 from allrank.models.model_utils import get_torch_device
 
 
-def neuralNDCG(y_pred, y_true, padded_value_indicator=PADDED_Y_VALUE, temperature=1., powered_relevancies=True, k=None,
-               stochastic=False, n_samples=32, beta=0.1, log_scores=True):
+def neuralNDCG(y_pred, y_true, padded_value_indicator=PADDED_Y_VALUE, temperature=1., 
+               powered_relevancies=True, k=None, stochastic=False, n_samples=32, 
+               beta=0.1, log_scores=True):
     """
-    NeuralNDCG loss introduced in "NeuralNDCG: Direct Optimisation of a Ranking Metric via Differentiable
-    Relaxation of Sorting" - https://arxiv.org/abs/2102.07831. Based on the NeuralSort algorithm.
-    :param y_pred: predictions from the model, shape [batch_size, slate_length]
-    :param y_true: ground truth labels, shape [batch_size, slate_length]
-    :param padded_value_indicator: an indicator of the y_true index containing a padded item, e.g. -1
-    :param temperature: temperature for the NeuralSort algorithm
-    :param powered_relevancies: whether to apply 2^x - 1 gain function, x otherwise
-    :param k: rank at which the loss is truncated
-    :param stochastic: whether to calculate the stochastic variant
-    :param n_samples: how many stochastic samples are taken, used if stochastic == True
-    :param beta: beta parameter for NeuralSort algorithm, used if stochastic == True
-    :param log_scores: log_scores parameter for NeuralSort algorithm, used if stochastic == True
-    :return: loss value, a torch.Tensor
+    Implementação corrigida do NeuralNDCG baseada no paper original:
+    "NeuralNDCG: Direct Optimisation of a Ranking Metric via Differentiable Relaxation of Sorting"
+    
+    Fórmula do paper: NeuralNDCG_k(τ)(s,y) = N^(-1)_k * Σ(j=1 to k) (scale(P̂)g(y))_j * d(j)
+    
+    Args:
+        y_pred: scores preditos [batch_size, slate_length] ou [batch_size, slate_length, 1]
+        y_true: labels verdadeiros [batch_size, slate_length]
+        padded_value_indicator: valor indicando padding
+        temperature: parâmetro τ para controlar suavidade da aproximação
+        powered_relevancies: se aplica função de ganho 2^x - 1
+        k: truncamento no rank k
+        stochastic: se usa variante estocástica
+        n_samples: número de amostras para variante estocástica
+        beta: parâmetro para NeuralSort estocástico
+        log_scores: se aplica log nos scores
+        
+    Returns:
+        loss: -NeuralNDCG (negativo porque queremos maximizar)
     """
-    dev = get_torch_device()
-
+    device = get_torch_device()
+    
+    # Handle different input shapes
+    if y_pred.dim() == 3:
+        if y_pred.shape[-1] == 1:
+            # Shape: [batch_size, slate_length, 1] -> [batch_size, slate_length]
+            y_pred = y_pred.squeeze(-1)
+        else:
+            # Shape: [batch_size, slate_length, num_classes] 
+            # Take the last dimension as scores (common in classification models)
+            # Or sum across classes, or use max - let's try summing
+            y_pred = y_pred.sum(dim=-1)
+    elif y_pred.dim() != 2:
+        raise ValueError(f"y_pred deve ter 2 ou 3 dimensões, recebeu shape: {y_pred.shape}")
+    
+    batch_size, slate_length = y_pred.shape
+    
+    # Default k to slate_length
     if k is None:
-        k = y_true.shape[1]
-
+        k = slate_length
+    k = min(k, slate_length)
+    
+    # Create padding mask
     mask = (y_true == padded_value_indicator)
-    # Choose the deterministic/stochastic variant
+    
+    # Step 1: Compute approximate permutation matrix P̂ using NeuralSort
     if stochastic:
-        P_hat = stochastic_neural_sort(y_pred.unsqueeze(-1), n_samples=n_samples, tau=temperature, mask=mask,
-                                       beta=beta, log_scores=log_scores)
+        P_hat = stochastic_neural_sort(
+            y_pred.unsqueeze(-1), n_samples=n_samples, tau=temperature, 
+            mask=mask, beta=beta, log_scores=log_scores
+        )  # [n_samples, batch_size, slate_length, slate_length]
+        n_samples_actual = P_hat.shape[0]
     else:
-        P_hat = deterministic_neural_sort(y_pred.unsqueeze(-1), tau=temperature, mask=mask).unsqueeze(0)
-
-    # Perform sinkhorn scaling to obtain doubly stochastic permutation matrices
-    P_hat = sinkhorn_scaling(P_hat.view(P_hat.shape[0] * P_hat.shape[1], P_hat.shape[2], P_hat.shape[3]),
-                             mask.repeat_interleave(P_hat.shape[0], dim=0), tol=1e-6, max_iter=50)
-    P_hat = P_hat.view(int(P_hat.shape[0] / y_pred.shape[0]), y_pred.shape[0], P_hat.shape[1], P_hat.shape[2])
-
-    # Mask P_hat and apply to true labels, ie approximately sort them
-    P_hat = P_hat.masked_fill(mask[None, :, :, None] | mask[None, :, None, :], 0.)
-    y_true_masked = y_true.masked_fill(mask, 0.).unsqueeze(-1).unsqueeze(0)
+        P_hat = deterministic_neural_sort(
+            y_pred.unsqueeze(-1), tau=temperature, mask=mask
+        ).unsqueeze(0)  # [1, batch_size, slate_length, slate_length]
+        n_samples_actual = 1
+    
+    # Step 2: Apply Sinkhorn scaling to make P̂ doubly stochastic
+    # Reshape for sinkhorn: [n_samples * batch_size, slate_length, slate_length]
+    P_hat_reshaped = P_hat.view(n_samples_actual * batch_size, slate_length, slate_length)
+    mask_repeated = mask.repeat(n_samples_actual, 1)
+    
+    P_hat_scaled = sinkhorn_scaling(P_hat_reshaped, mask_repeated, tol=1e-6, max_iter=50)
+    P_hat = P_hat_scaled.view(n_samples_actual, batch_size, slate_length, slate_length)
+    
+    # Step 3: Apply gain function g(y) to true labels
+    y_true_clean = y_true.masked_fill(mask, 0.0)
     if powered_relevancies:
-        y_true_masked = torch.pow(2., y_true_masked) - 1.
-
-    ground_truth = torch.matmul(P_hat, y_true_masked).squeeze(-1)
-    discounts = (torch.tensor(1.) / torch.log2(torch.arange(y_true.shape[-1], dtype=torch.float) + 2.)).to(dev)
-    discounted_gains = ground_truth * discounts
-
-    if powered_relevancies:
-        idcg = dcg(y_true, y_true, ats=[k]).permute(1, 0)
+        gains = torch.pow(2.0, y_true_clean) - 1.0  # g(y) = 2^y - 1
     else:
-        idcg = dcg(y_true, y_true, ats=[k], gain_function=lambda x: x).permute(1, 0)
-
-    discounted_gains = discounted_gains[:, :, :k]
-    ndcg = discounted_gains.sum(dim=-1) / (idcg + DEFAULT_EPS)
-    idcg_mask = idcg == 0.
-    ndcg = ndcg.masked_fill(idcg_mask.repeat(ndcg.shape[0], 1), 0.)
-
-    assert (ndcg < 0.).sum() >= 0, "every ndcg should be non-negative"
+        gains = y_true_clean  # g(y) = y
+    
+    # Step 4: Compute quasi-sorted gains: scale(P̂) * g(y)
+    # P̂ @ g(y): [n_samples, batch_size, slate_length, 1] -> [n_samples, batch_size, slate_length]
+    gains_expanded = gains.unsqueeze(0).unsqueeze(-1)  # [1, batch_size, slate_length, 1]
+    quasi_sorted_gains = torch.matmul(P_hat, gains_expanded).squeeze(-1)
+    
+    # Step 5: Apply discount function d(j) = 1/log2(j+2)
+    positions = torch.arange(1, slate_length + 1, dtype=torch.float32, device=device)
+    discounts = 1.0 / torch.log2(positions + 1.0)  # d(j) = 1/log2(j+1) onde j começa em 1
+    
+    # Step 6: Truncate to top-k positions for NDCG@k
+    quasi_sorted_gains_k = quasi_sorted_gains[:, :, :k]
+    discounts_k = discounts[:k]
+    
+    # Step 7: Compute DCG = Σ(j=1 to k) quasi_sorted_gains_j * d(j)
+    dcg_values = torch.sum(quasi_sorted_gains_k * discounts_k.unsqueeze(0).unsqueeze(0), dim=-1)
+    
+    # Step 8: Compute IDCG (Ideal DCG) using original labels
+    # Sort true gains in descending order and apply same discounts
+    if powered_relevancies:
+        ideal_gains = torch.pow(2.0, y_true_clean) - 1.0
+    else:
+        ideal_gains = y_true_clean
+    
+    # Sort gains in descending order for each query
+    ideal_gains_sorted, _ = torch.sort(ideal_gains, descending=True)
+    ideal_gains_k = ideal_gains_sorted[:, :k]
+    
+    # Compute IDCG
+    idcg = torch.sum(ideal_gains_k * discounts_k.unsqueeze(0), dim=-1)
+    
+    # Step 9: Normalize by IDCG to get NDCG
+    ndcg = dcg_values / (idcg.unsqueeze(0) + DEFAULT_EPS)
+    
+    # Step 10: Handle queries with IDCG = 0 (all labels are 0)
+    idcg_mask = (idcg == 0.0)
+    ndcg = ndcg.masked_fill(idcg_mask.unsqueeze(0), 0.0)
+    
+    # Verify all NDCG values are valid
+    assert torch.all(ndcg >= 0.0), "Todos os valores de NDCG devem ser não-negativos"
+    assert torch.all(ndcg <= 1.0 + 1e-6), "Todos os valores de NDCG devem ser <= 1"
+    
+    # Step 11: Compute mean over samples and valid queries
     if idcg_mask.all():
-        return torch.tensor(0.)
+        return torch.tensor(0.0, device=device, requires_grad=True)
+    
+    valid_queries = ~idcg_mask
+    mean_ndcg = ndcg[:, valid_queries].mean()
+    
+    return -mean_ndcg  # Return negative because we want to maximize NDCG
 
-    mean_ndcg = ndcg.sum() / ((~idcg_mask).sum() * ndcg.shape[0])  # type: ignore
-    return -1. * mean_ndcg  # -1 cause we want to maximize NDCG
-
-
-def neuralNDCG_transposed(y_pred, y_true, padded_value_indicator=PADDED_Y_VALUE, temperature=1.,
-                          powered_relevancies=True, k=None, stochastic=False, n_samples=32, beta=0.1, log_scores=True,
-                          max_iter=50, tol=1e-6):
+def neuralNDCG_transposed(y_pred, y_true, padded_value_indicator=PADDED_Y_VALUE, 
+                         temperature=1., powered_relevancies=True, k=None, 
+                         stochastic=False, n_samples=32, beta=0.1, log_scores=True,
+                         max_iter=50, tol=1e-6):
     """
-    NeuralNDCG Transposed loss introduced in "NeuralNDCG: Direct Optimisation of a Ranking Metric via Differentiable
-    Relaxation of Sorting" - https://arxiv.org/abs/2102.07831. Based on the NeuralSort algorithm.
-    :param y_pred: predictions from the model, shape [batch_size, slate_length]
-    :param y_true: ground truth labels, shape [batch_size, slate_length]
-    :param padded_value_indicator: an indicator of the y_true index containing a padded item, e.g. -1
-    :param temperature: temperature for the NeuralSort algorithm
-    :param powered_relevancies: whether to apply 2^x - 1 gain function, x otherwise
-    :param k: rank at which the loss is truncated
-    :param stochastic: whether to calculate the stochastic variant
-    :param n_samples: how many stochastic samples are taken, used if stochastic == True
-    :param beta: beta parameter for NeuralSort algorithm, used if stochastic == True
-    :param log_scores: log_scores parameter for NeuralSort algorithm, used if stochastic == True
-    :param max_iter: maximum iteration count for Sinkhorn scaling
-    :param tol: tolerance for Sinkhorn scaling
-    :return: loss value, a torch.Tensor
+    Implementação corrigida do NeuralNDCG Transposed baseada no paper:
+    
+    Fórmula do paper: NeuralNDCG^T_k(τ)(s,y) = N^(-1)_k * Σ(i=1 to n) g(y_i) * (scale(P̂^T) * d)_i
+    
+    Diferença: soma sobre documentos em vez de posições.
     """
-    dev = get_torch_device()
-
+    device = get_torch_device()
+    
+    # Handle different input shapes
+    if y_pred.dim() == 3:
+        if y_pred.shape[-1] == 1:
+            # Shape: [batch_size, slate_length, 1] -> [batch_size, slate_length]
+            y_pred = y_pred.squeeze(-1)
+        else:
+            # Shape: [batch_size, slate_length, num_classes] 
+            # Take the last dimension as scores (common in classification models)
+            # Or sum across classes, or use max - let's try summing
+            y_pred = y_pred.sum(dim=-1)
+    elif y_pred.dim() != 2:
+        raise ValueError(f"y_pred deve ter 2 ou 3 dimensões, recebeu shape: {y_pred.shape}")
+        
+    batch_size, slate_length = y_pred.shape
+    
+    # Default k to slate_length
     if k is None:
-        k = y_true.shape[1]
-
+        k = slate_length
+    k = min(k, slate_length)
+    
+    # Create padding mask
     mask = (y_true == padded_value_indicator)
-
+    
+    # Step 1: Compute approximate permutation matrix P̂
     if stochastic:
-        P_hat = stochastic_neural_sort(y_pred.unsqueeze(-1), n_samples=n_samples, tau=temperature, mask=mask,
-                                       beta=beta, log_scores=log_scores)
+        P_hat = stochastic_neural_sort(
+            y_pred.unsqueeze(-1), n_samples=n_samples, tau=temperature,
+            mask=mask, beta=beta, log_scores=log_scores
+        )
+        n_samples_actual = P_hat.shape[0]
     else:
-        P_hat = deterministic_neural_sort(y_pred.unsqueeze(-1), tau=temperature, mask=mask).unsqueeze(0)
-
-    # Perform sinkhorn scaling to obtain doubly stochastic permutation matrices
-    P_hat_masked = sinkhorn_scaling(P_hat.view(P_hat.shape[0] * y_pred.shape[0], y_pred.shape[1], y_pred.shape[1]),
-                                    mask.repeat_interleave(P_hat.shape[0], dim=0), tol=tol, max_iter=max_iter)
-    P_hat_masked = P_hat_masked.view(P_hat.shape[0], y_pred.shape[0], y_pred.shape[1], y_pred.shape[1])
-    discounts = (torch.tensor(1) / torch.log2(torch.arange(y_true.shape[-1], dtype=torch.float) + 2.)).to(dev)
-
-    # This takes care of the @k metric truncation - if something is @>k, it is useless and gets 0.0 discount
-    discounts[k:] = 0.
-    discounts = discounts[None, None, :, None]
-
-    # Here the discounts become expected discounts
-    discounts = torch.matmul(P_hat_masked.permute(0, 1, 3, 2), discounts).squeeze(-1)
+        P_hat = deterministic_neural_sort(
+            y_pred.unsqueeze(-1), tau=temperature, mask=mask
+        ).unsqueeze(0)
+        n_samples_actual = 1
+    
+    # Step 2: Transpose P̂ to get P̂^T (approximate unsorting matrix)
+    P_hat_T = P_hat.transpose(-2, -1)  # Transpose last two dimensions
+    
+    # Step 3: Apply Sinkhorn scaling to P̂^T to make it doubly stochastic
+    P_hat_T_reshaped = P_hat_T.view(n_samples_actual * batch_size, slate_length, slate_length)
+    mask_repeated = mask.repeat(n_samples_actual, 1)
+    
+    P_hat_T_scaled = sinkhorn_scaling(P_hat_T_reshaped, mask_repeated, tol=tol, max_iter=max_iter)
+    P_hat_T = P_hat_T_scaled.view(n_samples_actual, batch_size, slate_length, slate_length)
+    
+    # Step 4: Create discount vector with truncation at k
+    positions = torch.arange(1, slate_length + 1, dtype=torch.float32, device=device)
+    discounts = 1.0 / torch.log2(positions + 1.0)
+    
+    # Zero out discounts for positions > k
+    discounts[k:] = 0.0
+    
+    # Step 5: Compute expected discounts per document: P̂^T @ d
+    discounts_expanded = discounts.unsqueeze(0).unsqueeze(0).unsqueeze(-1)  # [1, 1, slate_length, 1]
+    expected_discounts = torch.matmul(P_hat_T, discounts_expanded).squeeze(-1)  # [n_samples, batch_size, slate_length]
+    
+    # Step 6: Apply gain function to true labels
+    y_true_clean = y_true.masked_fill(mask, 0.0)
     if powered_relevancies:
-        gains = torch.pow(2., y_true) - 1
-        discounted_gains = gains.unsqueeze(0) * discounts
-        idcg = dcg(y_true, y_true, ats=[k]).squeeze()
+        gains = torch.pow(2.0, y_true_clean) - 1.0
     else:
-        gains = y_true
-        discounted_gains = gains.unsqueeze(0) * discounts
-        idcg = dcg(y_true, y_true, ats=[k]).squeeze()
-
-    ndcg = discounted_gains.sum(dim=2) / (idcg + DEFAULT_EPS)
-    idcg_mask = idcg == 0.
-    ndcg = ndcg.masked_fill(idcg_mask, 0.)
-
-    assert (ndcg < 0.).sum() >= 0, "every ndcg should be non-negative"
+        gains = y_true_clean
+    
+    # Step 7: Compute weighted gains: g(y) * expected_discounts
+    weighted_gains = gains.unsqueeze(0) * expected_discounts  # [n_samples, batch_size, slate_length]
+    
+    # Step 8: Sum over documents to get DCG
+    dcg_values = torch.sum(weighted_gains, dim=-1)  # [n_samples, batch_size]
+    
+    # Step 9: Compute IDCG using original labels
+    if powered_relevancies:
+        ideal_gains = torch.pow(2.0, y_true_clean) - 1.0
+    else:
+        ideal_gains = y_true_clean
+    
+    ideal_gains_sorted, _ = torch.sort(ideal_gains, descending=True)
+    ideal_gains_k = ideal_gains_sorted[:, :k]
+    discounts_k = discounts[:k]
+    idcg = torch.sum(ideal_gains_k * discounts_k.unsqueeze(0), dim=-1)
+    
+    # Step 10: Normalize by IDCG
+    ndcg = dcg_values / (idcg.unsqueeze(0) + DEFAULT_EPS)
+    
+    # Handle queries with IDCG = 0
+    idcg_mask = (idcg == 0.0)
+    ndcg = ndcg.masked_fill(idcg_mask.unsqueeze(0), 0.0)
+    
+    # Verify validity
+    assert torch.all(ndcg >= 0.0), "Todos os valores de NDCG devem ser não-negativos"
+    assert torch.all(ndcg <= 1.0 + 1e-6), "Todos os valores de NDCG devem ser <= 1"
+    
+    # Compute mean over samples and valid queries
     if idcg_mask.all():
-        return torch.tensor(0.)
-
-    mean_ndcg = ndcg.sum() / ((~idcg_mask).sum() * ndcg.shape[0])  # type: ignore
-    return -1. * mean_ndcg  # -1 cause we want to maximize NDCG
+        return torch.tensor(0.0, device=device, requires_grad=True)
+    
+    valid_queries = ~idcg_mask
+    mean_ndcg = ndcg[:, valid_queries].mean()
+    
+    return -mean_ndcg
