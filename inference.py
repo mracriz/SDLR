@@ -118,16 +118,39 @@ def create_detailed_ranking_report(df_results):
         mrr_scores = {}
         for k in [1, 3, 5, 10]:
             if len(group) >= k:
-                ndcg_scores[f'ndcg_at_{k}'] = ndcg_at_k(group, k)
-                mrr_scores[f'mrr_at_{k}'] = mrr_at_k(group, k)
+                ndcg_scores[f'ndcg_at_{k}'] = float(ndcg_at_k(group, k))
+                mrr_scores[f'mrr_at_{k}'] = float(mrr_at_k(group, k))
+        
+        # Converte DataFrames para dicts com tipos serializáveis
+        ranking_dict = ranked_docs.to_dict('records')
+        ideal_dict = ideal_ranking[['manual_label', 'ideal_rank']].to_dict('records')
+        
+        # Converte valores numpy para tipos Python nativos
+        for item in ranking_dict:
+            for key, value in item.items():
+                if hasattr(value, 'item'):  # numpy scalar
+                    item[key] = value.item()
+                elif isinstance(value, np.floating):
+                    item[key] = float(value)
+                elif isinstance(value, np.integer):
+                    item[key] = int(value)
+        
+        for item in ideal_dict:
+            for key, value in item.items():
+                if hasattr(value, 'item'):  # numpy scalar
+                    item[key] = value.item()
+                elif isinstance(value, np.floating):
+                    item[key] = float(value)
+                elif isinstance(value, np.integer):
+                    item[key] = int(value)
         
         ranking_report = {
-            'query_id': query_id,
-            'num_docs': len(group),
-            'num_relevant_docs': sum(group['manual_label'] > 0),
+            'query_id': int(query_id) if hasattr(query_id, 'item') else query_id,
+            'num_docs': int(len(group)),
+            'num_relevant_docs': int(sum(group['manual_label'] > 0)),
             'metrics': {**ndcg_scores, **mrr_scores},
-            'ranking': ranked_docs.to_dict('records'),
-            'ideal_ranking': ideal_ranking[['manual_label', 'ideal_rank']].to_dict('records')
+            'ranking': ranking_dict,
+            'ideal_ranking': ideal_dict
         }
         
         ranking_reports.append(ranking_report)
@@ -222,13 +245,13 @@ def main():
             
             print("\n📊 NDCG Metrics:")
             for k in ks:
-                avg_ndcg = grouped.apply(lambda g: ndcg_at_k(g, k)).mean()
+                avg_ndcg = grouped.apply(lambda g: ndcg_at_k(g, k), include_groups=False).mean()
                 print(f"Average NDCG@{k}: {avg_ndcg:.4f}")
                 mlflow.log_metric(f"ndcg_at_{k}", avg_ndcg)
             
             print("\n🎯 MRR Metrics:")
             for k in ks:
-                avg_mrr = grouped.apply(lambda g: mrr_at_k(g, k)).mean()
+                avg_mrr = grouped.apply(lambda g: mrr_at_k(g, k), include_groups=False).mean()
                 print(f"Average MRR@{k}: {avg_mrr:.4f}")
                 mlflow.log_metric(f"mrr_at_{k}", avg_mrr)
 
@@ -276,10 +299,23 @@ def main():
                 ideal_ranking = list(zip(ideal_top10['manual_label'].values,
                                        ideal_top10['predicted_score'].values))
                 
+                # Converte valores numpy para tipos Python nativos
+                predicted_top10_list = []
+                for r, s in predicted_ranking:
+                    relevance = float(r) if hasattr(r, 'item') else float(r)
+                    score = float(s) if hasattr(s, 'item') else float(s)
+                    predicted_top10_list.append({'relevance': relevance, 'score': score})
+                
+                ideal_top10_list = []
+                for r, s in ideal_ranking:
+                    relevance = float(r) if hasattr(r, 'item') else float(r)
+                    score = float(s) if hasattr(s, 'item') else float(s)
+                    ideal_top10_list.append({'relevance': relevance, 'score': score})
+                
                 comparative_rankings.append({
-                    'query_id': query_id,
-                    'predicted_top10': [{'relevance': r, 'score': s} for r, s in predicted_ranking],
-                    'ideal_top10': [{'relevance': r, 'score': s} for r, s in ideal_ranking]
+                    'query_id': int(query_id) if hasattr(query_id, 'item') else query_id,
+                    'predicted_top10': predicted_top10_list,
+                    'ideal_top10': ideal_top10_list
                 })
             
             comparative_path = "comparative_rankings.json"
@@ -306,12 +342,12 @@ def main():
         
         print("\n📊 NDCG Metrics:")
         for k in ks:
-            avg_ndcg = grouped.apply(lambda g: ndcg_at_k(g, k)).mean()
+            avg_ndcg = grouped.apply(lambda g: ndcg_at_k(g, k), include_groups=False).mean()
             print(f"Average NDCG@{k}: {avg_ndcg:.4f}")
             
         print("\n🎯 MRR Metrics:")
         for k in ks:
-            avg_mrr = grouped.apply(lambda g: mrr_at_k(g, k)).mean()
+            avg_mrr = grouped.apply(lambda g: mrr_at_k(g, k), include_groups=False).mean()
             print(f"Average MRR@{k}: {avg_mrr:.4f}")
 
 if __name__ == "__main__":
