@@ -1,6 +1,7 @@
 import torch
 import os
 import sys
+import json
 import argparse
 from pathlib import Path
 import numpy as np
@@ -53,7 +54,7 @@ def parse_args():
     # n_features agora é opcional. Se não for fornecido, será detectado automaticamente.
     parser.add_argument("--n_features", type=int, default=None, help="(Opcional) Número de features no dataset. Se não fornecido, será detectado automaticamente.")
     # --- FIM DA MUDANÇA ---
-    parser.add_argument("--slate_length", type=int, default=30, help="Tamanho da slate usado para padding durante a inferência.")
+    parser.add_argument("--slate_length", type=int, default=40, help="Tamanho da slate usado para padding durante a inferência.")
     return parser.parse_args()
 
 def get_inference_device():
@@ -79,6 +80,59 @@ def ndcg_at_k(df_group, k, score_col='predicted_score', label_col='manual_label'
     ideal_discounts = np.log2(np.arange(len(ideal_relevance)) + 2)
     idcg = np.sum((np.power(2, ideal_relevance) - 1) / ideal_discounts)
     return 0.0 if idcg == 0 else dcg / idcg
+
+def mrr_at_k(df_group, k, score_col='predicted_score', label_col='manual_label'):
+    """
+    Calcula Mean Reciprocal Rank (MRR) at k para um grupo de documentos.
+    MRR considera a posição do primeiro documento relevante.
+    """
+    # Ordena por score predito em ordem decrescente
+    sorted_items = df_group.sort_values(by=score_col, ascending=False).head(k)
+    
+    # Encontra a posição do primeiro documento relevante (label > 0)
+    for position, (_, row) in enumerate(sorted_items.iterrows(), start=1):
+        if row[label_col] > 0:  # Documento relevante
+            return 1.0 / position
+    
+    return 0.0  # Nenhum documento relevante encontrado no top-k
+
+def create_detailed_ranking_report(df_results):
+    """
+    Cria um relatório detalhado dos rankings para cada query.
+    """
+    ranking_reports = []
+    
+    for query_id, group in df_results.groupby('query_id'):
+        # Ordena por score predito (ranking do modelo)
+        ranked_docs = group.sort_values(by='predicted_score', ascending=False).reset_index(drop=True)
+        
+        # Adiciona informações de posição
+        ranked_docs['predicted_rank'] = range(1, len(ranked_docs) + 1)
+        
+        # Ordena por relevância real para comparação
+        ideal_ranking = group.sort_values(by='manual_label', ascending=False).reset_index(drop=True)
+        ideal_ranking['ideal_rank'] = range(1, len(ideal_ranking) + 1)
+        
+        # Calcula métricas para esta query
+        ndcg_scores = {}
+        mrr_scores = {}
+        for k in [1, 3, 5, 10]:
+            if len(group) >= k:
+                ndcg_scores[f'ndcg_at_{k}'] = ndcg_at_k(group, k)
+                mrr_scores[f'mrr_at_{k}'] = mrr_at_k(group, k)
+        
+        ranking_report = {
+            'query_id': query_id,
+            'num_docs': len(group),
+            'num_relevant_docs': sum(group['manual_label'] > 0),
+            'metrics': {**ndcg_scores, **mrr_scores},
+            'ranking': ranked_docs.to_dict('records'),
+            'ideal_ranking': ideal_ranking[['manual_label', 'ideal_rank']].to_dict('records')
+        }
+        
+        ranking_reports.append(ranking_report)
+    
+    return ranking_reports
 
 def main():
     """
@@ -153,33 +207,112 @@ def main():
     predicted_scores = np.concatenate(all_predictions).flatten()
 
     # --- 4. Avaliar e Registrar Resultados ---
-    # ... (código inalterado) ...
     df_results = pd.DataFrame({
         'query_id': q_ids, 'manual_label': y_labels, 'predicted_score': predicted_scores
     })
-    print("\n--- Calculating and Logging NDCG ---")
+    
+    print("\n--- Calculating NDCG and MRR Metrics ---")
     if args.mlflow_run_id:
         with mlflow.start_run(run_id=args.mlflow_run_id):
             print(f"Successfully connected to MLflow Run ID: {args.mlflow_run_id}")
+            
+            # Calcula métricas agregadas
             ks = [1, 3, 5, 10, 20]
             grouped = df_results.groupby('query_id')
+            
+            print("\n📊 NDCG Metrics:")
             for k in ks:
                 avg_ndcg = grouped.apply(lambda g: ndcg_at_k(g, k)).mean()
                 print(f"Average NDCG@{k}: {avg_ndcg:.4f}")
                 mlflow.log_metric(f"ndcg_at_{k}", avg_ndcg)
+            
+            print("\n🎯 MRR Metrics:")
+            for k in ks:
+                avg_mrr = grouped.apply(lambda g: mrr_at_k(g, k)).mean()
+                print(f"Average MRR@{k}: {avg_mrr:.4f}")
+                mlflow.log_metric(f"mrr_at_{k}", avg_mrr)
 
+            # Salva dados básicos de scores
             results_path = "inference_scores.csv"
             df_results.to_csv(results_path, index=False)
             mlflow.log_artifact(results_path, "evaluation_output")
+            
+            # Cria e salva relatório detalhado de rankings
+            print("\n📝 Creating detailed ranking reports...")
+            detailed_reports = create_detailed_ranking_report(df_results)
+            
+            # Salva relatório detalhado como JSON
+            detailed_report_path = "detailed_ranking_report.json"
+            with open(detailed_report_path, 'w', encoding='utf-8') as f:
+                json.dump(detailed_reports, f, indent=2, ensure_ascii=False)
+            mlflow.log_artifact(detailed_report_path, "evaluation_output")
+            
+            # Cria relatório resumido por query
+            query_summary = []
+            for report in detailed_reports:
+                summary = {
+                    'query_id': report['query_id'],
+                    'num_docs': report['num_docs'],
+                    'num_relevant_docs': report['num_relevant_docs'],
+                    **report['metrics']
+                }
+                query_summary.append(summary)
+            
+            query_summary_df = pd.DataFrame(query_summary)
+            query_summary_path = "query_level_metrics.csv"
+            query_summary_df.to_csv(query_summary_path, index=False)
+            mlflow.log_artifact(query_summary_path, "evaluation_output")
+            
+            # Cria relatório de rankings comparativos (top-10 predito vs ideal)
+            comparative_rankings = []
+            for query_id, group in df_results.groupby('query_id'):
+                # Top-10 predito
+                predicted_top10 = group.sort_values('predicted_score', ascending=False).head(10)
+                predicted_ranking = list(zip(predicted_top10['manual_label'].values, 
+                                           predicted_top10['predicted_score'].values))
+                
+                # Top-10 ideal
+                ideal_top10 = group.sort_values('manual_label', ascending=False).head(10)
+                ideal_ranking = list(zip(ideal_top10['manual_label'].values,
+                                       ideal_top10['predicted_score'].values))
+                
+                comparative_rankings.append({
+                    'query_id': query_id,
+                    'predicted_top10': [{'relevance': r, 'score': s} for r, s in predicted_ranking],
+                    'ideal_top10': [{'relevance': r, 'score': s} for r, s in ideal_ranking]
+                })
+            
+            comparative_path = "comparative_rankings.json"
+            with open(comparative_path, 'w', encoding='utf-8') as f:
+                json.dump(comparative_rankings, f, indent=2, ensure_ascii=False)
+            mlflow.log_artifact(comparative_path, "evaluation_output")
+            
+            # Remove arquivos temporários
             os.remove(results_path)
-            print("NDCG metrics and scores CSV logged to MLflow.")
+            os.remove(detailed_report_path)
+            os.remove(query_summary_path)
+            os.remove(comparative_path)
+            
+            print("✅ All metrics, rankings, and detailed reports logged to MLflow!")
+            print("📁 Artifacts saved:")
+            print("   - inference_scores.csv: Basic scores per document")
+            print("   - detailed_ranking_report.json: Complete ranking analysis")
+            print("   - query_level_metrics.csv: Per-query NDCG and MRR metrics")
+            print("   - comparative_rankings.json: Predicted vs Ideal top-10 rankings")
     else:
         print("No MLflow Run ID provided. Printing metrics locally.")
         ks = [1, 3, 5, 10]
         grouped = df_results.groupby('query_id')
+        
+        print("\n📊 NDCG Metrics:")
         for k in ks:
             avg_ndcg = grouped.apply(lambda g: ndcg_at_k(g, k)).mean()
             print(f"Average NDCG@{k}: {avg_ndcg:.4f}")
+            
+        print("\n🎯 MRR Metrics:")
+        for k in ks:
+            avg_mrr = grouped.apply(lambda g: mrr_at_k(g, k)).mean()
+            print(f"Average MRR@{k}: {avg_mrr:.4f}")
 
 if __name__ == "__main__":
     main()
